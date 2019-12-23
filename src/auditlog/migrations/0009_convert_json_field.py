@@ -1,13 +1,10 @@
 from django.db import migrations
 from django.contrib.auth.management import create_permissions
-
+from django.db.models import F
 
 def convert_json_field(apps, schema_editor):
     LogEntry = apps.get_model("auditlog", "LogEntry")
-
-    for log_entry in LogEntry.objects.all():
-        log_entry.additional_data_new = log_entry.additional_data  
-        log_entry.save()
+    LogEntry.objects.all().update(additional_data_new=F("additional_data"))
 
 
 class Migration(migrations.Migration):
