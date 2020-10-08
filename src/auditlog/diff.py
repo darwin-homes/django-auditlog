@@ -81,6 +81,21 @@ def get_field_value(obj, field):
 
     return value
 
+def get_field_id(obj, field_name):
+    """
+    Gets the value of a given model instance field.
+    :param obj: The model instance.
+    :type obj: Model
+    :param field_name: The field name you want to find the id of.
+    :type field: str
+    :return: The value of the field as a string.
+    :rtype: str
+    """
+    foreign_object = getattr(obj, field_name, None)
+    if foreign_object:
+        if getattr(foreign_object, "id", None):
+            return foreign_object.id
+    
 
 def model_instance_diff(old, new):
     """
@@ -117,6 +132,7 @@ def model_instance_diff(old, new):
         fields = set()
         model_fields = None
 
+    include_id_fields = [field for field in model_fields['include_fields'] if field[-3:] == "_id"]
     # Check if fields must be filtered
     if model_fields and (model_fields['include_fields'] or model_fields['exclude_fields']) and fields:
         filtered_fields = []
@@ -129,6 +145,17 @@ def model_instance_diff(old, new):
             filtered_fields = [field for field in filtered_fields
                                if field.name not in model_fields['exclude_fields']]
         fields = filtered_fields
+
+    field_names = set([field.name for field in fields])
+
+    for id_field in include_id_fields:
+        field_name = id_field[:-3]
+        if field_name in field_names:
+            old_value = get_field_id(old, field_name)
+            new_value = get_field_id(new, field_name)
+
+            if old_value != new_value:
+                diff[id_field] = (smart_text(old_value), smart_text(new_value))
 
     for field in fields:
         old_value = get_field_value(old, field)
