@@ -14,12 +14,15 @@ def log_create(sender, instance, created, **kwargs):
     """
     if created:
         changes = model_instance_diff(None, instance)
-
-        log_entry = LogEntry.objects.log_create(
-            instance,
-            action=LogEntry.Action.CREATE,
-            changes=json.dumps(changes),
-        )
+        try:
+            log_entry = LogEntry.objects.log_create(
+                instance,
+                action=LogEntry.Action.CREATE,
+                changes=json.dumps(changes),
+            )
+        except Exception as e:
+            print(changes)
+            raise e
 
 
 def log_update(sender, instance, **kwargs):
