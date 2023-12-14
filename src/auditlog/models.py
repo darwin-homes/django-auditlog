@@ -8,10 +8,15 @@ from django.contrib.contenttypes.fields import GenericRelation
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models, DEFAULT_DB_ALIAS
-from django.db.models import QuerySet, Q
+from django.db.models import QuerySet, Q, JSONField
 from django.utils import formats, timezone
 from django.utils.encoding import smart_str
+<<<<<<< HEAD
 from django.utils.translation import ugettext_lazy as _
+=======
+from django.utils.translation import gettext_lazy as _
+
+>>>>>>> 9f50225 (Change jsonfield)
 
 from dateutil import parser
 from dateutil.tz import gettz
