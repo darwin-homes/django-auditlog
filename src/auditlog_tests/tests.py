@@ -1,5 +1,7 @@
 import datetime
 import django
+import random
+from unittest.mock import patch
 from django.conf import settings
 from django.contrib import auth
 from django.contrib.auth.models import User, AnonymousUser
@@ -13,6 +15,7 @@ from dateutil.tz import gettz
 from auditlog.middleware import AuditlogMiddleware
 from auditlog.models import LogEntry
 from auditlog.registry import auditlog
+from auditlog.signals import pre_log, post_log
 from auditlog_tests.models import SimpleModel, AltPrimaryKeyModel, UUIDPrimaryKeyModel, \
     ProxyModel, SimpleIncludeModel, SimpleExcludeModel, SimpleMappingModel, RelatedModel, \
     ManyRelatedModel, AdditionalDataIncludedModel, DateTimeFieldModel, ChoicesFieldModel, \
@@ -702,3 +705,221 @@ class NoDeleteHistoryTest(TestCase):
             list(entries.values_list('action', flat=True)),
             [LogEntry.Action.CREATE, LogEntry.Action.UPDATE, LogEntry.Action.DELETE]
         )
+
+
+class SignalTests(TestCase):
+    def setUp(self):
+        self.obj = SimpleModel.objects.create(text="I am not difficult.")
+        self.my_pre_log_data = {
+            "is_called": False,
+            "my_sender": None,
+            "my_instance": None,
+            "my_action": None,
+        }
+        self.my_post_log_data = {
+            "is_called": False,
+            "my_sender": None,
+            "my_instance": None,
+            "my_action": None,
+            "my_error": None,
+            "my_log_entry": None,
+        }
+
+    def assertSignals(self, action):
+        self.assertTrue(
+            self.my_pre_log_data["is_called"], "pre_log hook receiver not called"
+        )
+        self.assertIs(self.my_pre_log_data["my_sender"], self.obj.__class__)
+        self.assertIs(self.my_pre_log_data["my_instance"], self.obj)
+        self.assertEqual(self.my_pre_log_data["my_action"], action)
+
+        self.assertTrue(
+            self.my_post_log_data["is_called"], "post_log hook receiver not called"
+        )
+        self.assertIs(self.my_post_log_data["my_sender"], self.obj.__class__)
+        self.assertIs(self.my_post_log_data["my_instance"], self.obj)
+        self.assertEqual(self.my_post_log_data["my_action"], action)
+        self.assertIsNone(self.my_post_log_data["my_error"])
+        self.assertIsNotNone(self.my_post_log_data["my_log_entry"])
+
+    def test_custom_signals(self):
+        my_ret_val = random.randint(0, 10000)
+        my_other_ret_val = random.randint(0, 10000)
+
+        def pre_log_receiver(sender, instance, action, **_kwargs):
+            self.my_pre_log_data["is_called"] = True
+            self.my_pre_log_data["my_sender"] = sender
+            self.my_pre_log_data["my_instance"] = instance
+            self.my_pre_log_data["my_action"] = action
+            return my_ret_val
+
+        def pre_log_receiver_extra(*_args, **_kwargs):
+            return my_other_ret_val
+
+        def post_log_receiver(
+            sender, instance, action, error, log_entry, pre_log_results, **_kwargs
+        ):
+            self.my_post_log_data["is_called"] = True
+            self.my_post_log_data["my_sender"] = sender
+            self.my_post_log_data["my_instance"] = instance
+            self.my_post_log_data["my_action"] = action
+            self.my_post_log_data["my_error"] = error
+            self.my_post_log_data["my_log_entry"] = log_entry
+
+            self.assertEqual(len(pre_log_results), 2)
+
+            found_first_result = False
+            found_second_result = False
+            for pre_log_fn, pre_log_result in pre_log_results:
+                if pre_log_fn is pre_log_receiver and pre_log_result == my_ret_val:
+                    found_first_result = True
+            for pre_log_fn, pre_log_result in pre_log_results:
+                if (
+                    pre_log_fn is pre_log_receiver_extra
+                    and pre_log_result == my_other_ret_val
+                ):
+                    found_second_result = True
+
+            self.assertTrue(found_first_result)
+            self.assertTrue(found_second_result)
+
+            return my_ret_val
+
+        pre_log.connect(pre_log_receiver)
+        pre_log.connect(pre_log_receiver_extra)
+        post_log.connect(post_log_receiver)
+
+        self.obj = SimpleModel.objects.create(text="I am not difficult.")
+
+        self.assertSignals(LogEntry.Action.CREATE)
+
+    def test_disabled_logging(self):
+        log_count = LogEntry.objects.count()
+
+        def pre_log_receiver(sender, instance, action, **_kwargs):
+            return True
+
+        def pre_log_receiver_extra(*_args, **_kwargs):
+            pass
+
+        def pre_log_receiver_disable(*_args, **_kwargs):
+            return False
+
+        pre_log.connect(pre_log_receiver)
+        pre_log.connect(pre_log_receiver_extra)
+
+        self.obj = SimpleModel.objects.create(text="I am not difficult.")
+
+        self.assertEqual(LogEntry.objects.count(), log_count + 1)
+
+        log_count = LogEntry.objects.count()
+
+        pre_log.connect(pre_log_receiver_disable)
+
+        self.obj = SimpleModel.objects.create(text="I am not difficult.")
+
+        self.assertEqual(LogEntry.objects.count(), log_count)
+
+    def test_custom_signals_update(self):
+        def pre_log_receiver(sender, instance, action, **_kwargs):
+            self.my_pre_log_data["is_called"] = True
+            self.my_pre_log_data["my_sender"] = sender
+            self.my_pre_log_data["my_instance"] = instance
+            self.my_pre_log_data["my_action"] = action
+
+        def post_log_receiver(sender, instance, action, error, log_entry, **_kwargs):
+            self.my_post_log_data["is_called"] = True
+            self.my_post_log_data["my_sender"] = sender
+            self.my_post_log_data["my_instance"] = instance
+            self.my_post_log_data["my_action"] = action
+            self.my_post_log_data["my_error"] = error
+            self.my_post_log_data["my_log_entry"] = log_entry
+
+        pre_log.connect(pre_log_receiver)
+        post_log.connect(post_log_receiver)
+
+        self.obj.text = "Changed Text"
+        self.obj.save()
+
+        self.assertSignals(LogEntry.Action.UPDATE)
+
+    def test_custom_signals_delete(self):
+        def pre_log_receiver(sender, instance, action, **_kwargs):
+            self.my_pre_log_data["is_called"] = True
+            self.my_pre_log_data["my_sender"] = sender
+            self.my_pre_log_data["my_instance"] = instance
+            self.my_pre_log_data["my_action"] = action
+
+        def post_log_receiver(sender, instance, action, error, log_entry, **_kwargs):
+            self.my_post_log_data["is_called"] = True
+            self.my_post_log_data["my_sender"] = sender
+            self.my_post_log_data["my_instance"] = instance
+            self.my_post_log_data["my_action"] = action
+            self.my_post_log_data["my_error"] = error
+            self.my_post_log_data["my_log_entry"] = log_entry
+
+        pre_log.connect(pre_log_receiver)
+        post_log.connect(post_log_receiver)
+
+        self.obj.delete()
+
+        self.assertSignals(LogEntry.Action.DELETE)
+
+    @patch("auditlog.receivers.LogEntry.objects")
+    def test_signals_errors(self, log_entry_objects_mock):
+        class CustomSignalError(BaseException):
+            pass
+
+        def post_log_receiver(error, **_kwargs):
+            self.my_post_log_data["my_error"] = error
+
+        post_log.connect(post_log_receiver)
+
+        # create
+        error_create = CustomSignalError(LogEntry.Action.CREATE)
+        log_entry_objects_mock.log_create.side_effect = error_create
+        with self.assertRaises(CustomSignalError):
+            SimpleModel.objects.create(text="I am not difficult.")
+        self.assertEqual(self.my_post_log_data["my_error"], error_create)
+
+        # update
+        error_update = CustomSignalError(LogEntry.Action.UPDATE)
+        log_entry_objects_mock.log_create.side_effect = error_update
+        with self.assertRaises(CustomSignalError):
+            obj = SimpleModel.objects.get(pk=self.obj.pk)
+            obj.text = "updating"
+            obj.save()
+        self.assertEqual(self.my_post_log_data["my_error"], error_update)
+
+        # delete
+        error_delete = CustomSignalError(LogEntry.Action.DELETE)
+        log_entry_objects_mock.log_create.side_effect = error_delete
+        with self.assertRaises(CustomSignalError):
+            obj = SimpleModel.objects.get(pk=self.obj.pk)
+            obj.delete()
+        self.assertEqual(self.my_post_log_data["my_error"], error_delete)
+
+    def test_only_update_logging_enabled(self):
+        log_count = LogEntry.objects.count()
+
+        # Only log updates for SimpleModel
+        def filter_simple_model_logging(sender, instance, action, **_kwargs):
+            return action == LogEntry.Action.UPDATE
+
+        pre_log.connect(filter_simple_model_logging, sender=SimpleModel)
+
+        self.obj = SimpleModel.objects.create(text="I am not difficult.")
+
+        self.assertEqual(LogEntry.objects.count(), log_count)
+
+        self.obj.text = "Changed Text"
+        self.obj.save()
+
+        self.assertEqual(LogEntry.objects.count(), log_count + 1)
+
+        # Logging for other models should still be enabled
+        log_count = LogEntry.objects.count()
+        self.diff_obj = SimpleExcludeModel.objects.create(text="I am not difficult.")
+        self.assertEqual(LogEntry.objects.count(), log_count + 1)
+
+        pre_log.disconnect(filter_simple_model_logging, sender=SimpleModel)
