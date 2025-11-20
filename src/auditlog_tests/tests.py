@@ -870,7 +870,7 @@ class SignalTests(TestCase):
         class CustomSignalError(BaseException):
             pass
 
-        def post_log_receiver(error, **_kwargs):
+        def post_log_receiver(sender, instance, action, error, **_kwargs):
             self.my_post_log_data["my_error"] = error
 
         post_log.connect(post_log_receiver)
