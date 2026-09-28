@@ -1,14 +1,18 @@
 import datetime
 import django
 import random
+import uuid
 from unittest.mock import patch
 from django.conf import settings
 from django.contrib import auth
 from django.contrib.auth.models import User, AnonymousUser
+from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
+from django.db import connection
 from django.db.models.signals import pre_save
 from django.http import HttpResponse
 from django.test import TestCase, RequestFactory
+from django.test.utils import CaptureQueriesContext
 from django.utils import dateformat, formats, timezone
 from dateutil.tz import gettz
 
@@ -124,7 +128,7 @@ class MiddlewareTest(TestCase):
     Test the middleware responsible for connecting and disconnecting the signals used in automatic logging.
     """
     def setUp(self):
-        self.middleware = AuditlogMiddleware()
+        self.middleware = AuditlogMiddleware(lambda request: None)
         self.factory = RequestFactory()
         self.user = User.objects.create_user(username='test', email='test@example.com', password='top_secret')
 
@@ -923,3 +927,47 @@ class SignalTests(TestCase):
         self.assertEqual(LogEntry.objects.count(), log_count + 1)
 
         pre_log.disconnect(filter_simple_model_logging, sender=SimpleModel)
+class LogCreatePurgeTest(TestCase):
+    def test_auto_field_create_skips_purge_queries(self):
+        with CaptureQueriesContext(connection) as captured:
+            SimpleModel.objects.create(text='x')
+
+        statements = [query['sql'] for query in captured.captured_queries if 'auditlog_logentry' in query['sql']]
+        self.assertEqual(len(statements), 1, msg="Exactly one auditlog_logentry statement is issued")
+        self.assertTrue(statements[0].startswith('INSERT'), msg="The only auditlog_logentry statement is the INSERT")
+
+    def test_auto_field_recreate_keeps_history(self):
+        obj = NoDeleteHistoryModel.objects.create()
+        object_id = obj.id
+        obj.delete()
+        NoDeleteHistoryModel.objects.create(id=object_id)
+
+        content_type = ContentType.objects.get_for_model(NoDeleteHistoryModel)
+        actions = list(LogEntry.objects.filter(
+            content_type=content_type, object_id=object_id,
+        ).order_by('pk').values_list('action', flat=True))
+        self.assertEqual(
+            actions,
+            [LogEntry.Action.CREATE, LogEntry.Action.DELETE, LogEntry.Action.CREATE],
+            msg="CREATE, DELETE, CREATE history is kept for a reused AutoField pk",
+        )
+
+    def test_non_auto_pk_recreate_still_purges(self):
+        alt = AltPrimaryKeyModel.objects.create(key='k')
+        alt.delete()
+        AltPrimaryKeyModel.objects.create(key='k')
+
+        alt_content_type = ContentType.objects.get_for_model(AltPrimaryKeyModel)
+        alt_entries = LogEntry.objects.filter(content_type=alt_content_type, object_pk='k')
+        self.assertEqual(alt_entries.count(), 1, msg="AltPrimaryKeyModel re-create purges previous entries")
+        self.assertEqual(alt_entries.get().action, LogEntry.Action.CREATE, msg="Remaining entry is the new CREATE")
+
+        fixed_uuid = uuid.UUID('12345678-1234-5678-1234-567812345678')
+        uuid_obj = UUIDPrimaryKeyModel.objects.create(id=fixed_uuid)
+        uuid_obj.delete()
+        UUIDPrimaryKeyModel.objects.create(id=fixed_uuid)
+
+        uuid_content_type = ContentType.objects.get_for_model(UUIDPrimaryKeyModel)
+        uuid_entries = LogEntry.objects.filter(content_type=uuid_content_type, object_pk=str(fixed_uuid))
+        self.assertEqual(uuid_entries.count(), 1, msg="UUIDPrimaryKeyModel re-create purges previous entries")
+        self.assertEqual(uuid_entries.get().action, LogEntry.Action.CREATE, msg="Remaining entry is the new CREATE")
